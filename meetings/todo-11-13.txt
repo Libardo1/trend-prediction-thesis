@@ -1,0 +1,8 @@
+Get FP/FN and sort by popularity
+Try without avg_statuses
+Change precision to weight by trend size
+Try ablation test
+Try adding language-based features
+Try zscore normalizing
+Add verified accounts feature
+Try naive bayes on 3h window before trends
