@@ -1,0 +1,19 @@
+Standard
+========
+
+Precision/Recall - 84.9%, 83.4%
+
+Drop Delta Delta
+================
+
+Precision/Recall - 85.4%, 86.9%
+
+Drop Delta
+==========
+
+Precision/Recall - 87.6%, 84.6%
+
+Drop Count
+==========
+
+Precision/Recall - 79.2%, 82.3%

@@ -1,0 +1,70 @@
+P/R: 0.8105263157894737, 0.88
+
+Confusion Matrix
+================
+
+		     Predicted Trend	Predicted Non-Trend
+Actual Trend	     167	       	21
+Non-Trend	     36		152
+
+Examples
+========
+
+False Negative - Index 15
+False Negative - Index 17
+False Negative - Index 31
+False Negative - Index 35
+False Negative - Index 45
+False Negative - Index 48
+False Negative - Index 55
+False Negative - Index 61
+False Negative - Index 68
+False Negative - Index 78
+False Negative - Index 84
+False Negative - Index 86
+False Negative - Index 90
+False Negative - Index 93
+False Negative - Index 119
+False Negative - Index 133
+False Negative - Index 137
+False Negative - Index 152
+False Negative - Index 159
+False Negative - Index 161
+False Negative - Index 165
+False Positive - Index 190
+False Positive - Index 198
+False Positive - Index 203
+False Positive - Index 214
+False Positive - Index 219
+False Positive - Index 222
+False Positive - Index 224
+False Positive - Index 225
+False Positive - Index 226
+False Positive - Index 238
+False Positive - Index 245
+False Positive - Index 246
+False Positive - Index 259
+False Positive - Index 261
+False Positive - Index 272
+False Positive - Index 274
+False Positive - Index 275
+False Positive - Index 280
+False Positive - Index 281
+False Positive - Index 295
+False Positive - Index 296
+False Positive - Index 297
+False Positive - Index 301
+False Positive - Index 306
+False Positive - Index 308
+False Positive - Index 310
+False Positive - Index 317
+False Positive - Index 325
+False Positive - Index 331
+False Positive - Index 332
+False Positive - Index 338
+False Positive - Index 339
+False Positive - Index 345
+False Positive - Index 346
+False Positive - Index 347
+False Positive - Index 349
+
