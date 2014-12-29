@@ -1,17 +1,9 @@
 from datetime import datetime, timedelta, timezone
 import math
 import numpy as np
-# import mlpy
 import random
 import json
 from .twitter import BagOfWords, Stopwords, TwitterTrend
-
-import rpy2.robjects.numpy2ri
-from rpy2.robjects.packages import importr
-
-rpy2.robjects.numpy2ri.activate()
-DTW = importr('dtw')
-R = rpy2.robjects.r
 
 
 TREND_PREEMT = 90  # Number of windows to preempt trends by
@@ -24,8 +16,8 @@ def dtw_distance(a, b):
     This takes two numpy arrays and computes the DTW distance according to
     http://en.wikipedia.org/wiki/Dynamic_time_warping
     """
-    n = a.size // 3
-    m = b.size // 3  # Each point in time takes three columns
+    n = a.size
+    m = b.size  # Each point in time takes three columns
 
     dtw = np.zeros((n, m), dtype=np.object)
     dtw[0][0] = 0
@@ -34,19 +26,13 @@ def dtw_distance(a, b):
         if i == 0:
             continue
         j = 0
-        cost = TrendCell.count_weight * ((a[3 * i] - b[3 * j]) ** 2)
-        cost += TrendCell.delta_weight * ((a[3 * i + 1] - b[3 * j + 1]) ** 2)
-        cost += TrendCell.delta_delta_weight * ((a[3 * i + 2] - b[3 * j + 2]) ** 2)
-        dtw[i][j] = cost + dtw[i - 1][j]
+        dtw[i][j] = a[i].distance(b[j]) + dtw[i - 1][j]
 
     for j in range(n):
         if j == 0:
             continue
         i = 0
-        cost = TrendCell.count_weight * ((a[3 * i] - b[3 * j]) ** 2)
-        cost += TrendCell.delta_weight * ((a[3 * i + 1] - b[3 * j + 1]) ** 2)
-        cost += TrendCell.delta_delta_weight * ((a[3 * i + 2] - b[3 * j + 2]) ** 2)
-        dtw[i][j] = cost + dtw[i][j - 1]
+        dtw[i][j] = a[i].distance(b[j]) + dtw[i][j - 1]
 
     for i in range(n):
         if i == 0:
@@ -54,11 +40,8 @@ def dtw_distance(a, b):
         for j in range(m):
             if j == 0:
                 continue
-            cost = TrendCell.count_weight * ((a[3 * i] - b[3 * j]) ** 2)
-            cost += TrendCell.delta_weight * ((a[3 * i + 1] - b[3 * j + 1]) ** 2)
-            cost += TrendCell.delta_delta_weight * ((a[3 * i + 2] - b[3 * j + 2]) ** 2)
 
-            dtw[i][j] = cost + min(dtw[i - 1][j], dtw[i][j - 1], dtw[i - 1][j - 1])
+            dtw[i][j] = a[i].distance(b[j]) + min(dtw[i - 1][j], dtw[i][j - 1], dtw[i - 1][j - 1])
     return dtw[n - 1][m - 1]
 
 
@@ -125,13 +108,14 @@ class TrendModel:
         In the future, this may tune TopicCell weights until this is optimum.
         For now, it just computes it.
         """
-        total = 0
         true_positives = 0
         true_negatives = 0
         false_positives = 0
         false_negatives = 0
 
-        mat, y = self.matrix()
+        self.normalize()
+        mat, y = [trend.data for trend in self.trends], \
+                 [1 if trend.data.trending else 0 for trend in self.trends]
 
         for i, trend_a in enumerate(mat):
             match = None
@@ -140,8 +124,7 @@ class TrendModel:
             for j, trend_b in enumerate(mat):
                 if i == j:
                     continue
-                alignment = R.dtw(trend_a, trend_b, distance=True, window='itakura')
-                dist = alignment.rx('distance')[0][0]
+                dist = dtw_distance(trend_a, trend_b)
                 if match is None:
                     match = j
                     min_distance = dist
@@ -166,8 +149,7 @@ class TrendModel:
         precision = true_positives / (true_positives + false_positives)
         recall = true_positives / (true_positives + false_negatives)
 
-        return (precision, recall)
-
+        return precision, recall
 
     def serialize(self):
         """ Return a string encoding of the model. """
@@ -178,6 +160,22 @@ class TrendModel:
         width = max([len(trend.data) for trend in self.trends])
         y = []
         m = np.zeros((len(self.trends), width), dtype=('float64', 6))
+        for i, trend in enumerate(self.trends):
+            if trend.trending():
+                y.append(1)
+            else:
+                y.append(0)
+            for j, datum in enumerate(trend.data):
+                m[i, j] = (datum.count, datum.delta, datum.delta_delta,
+                           datum.avg_followers, datum.avg_statuses,
+                           datum.retweets)
+        return m, y
+
+    def normalize(self):
+        """ Modify the member trend cells to be normalized in [0,1].
+
+        :return:
+        """
         for i, trend in enumerate(self.trends):
             # Get the maxes for normalization
             max_count = max([datum.count for datum in trend.data])
@@ -191,16 +189,12 @@ class TrendModel:
             max_statuses = 1 if max_statuses == 0 else max_statuses
             max_followers = 1 if max_followers == 0 else max_followers
 
-            if trend.trending():
-                y.append(1)
-            else:
-                y.append(0)
             for j, datum in enumerate(trend.data):
-                m[i, j] = (datum.count / max_count, datum.delta / max_delta,
-                           datum.delta_delta / max_delta_delta,
-                           datum.avg_followers / max_followers,
-                           datum.avg_statuses / max_statuses, datum.retweets)
-        return m, y
+                datum.count = datum.count / max_count
+                datum.delta = datum.delta / max_delta
+                datum.delta_delta = datum.delta_delta / max_delta_delta
+                datum.avg_followers = datum.avg_followers / max_followers
+                datum.avg_statuses = datum.avg_statuses / max_statuses
 
     @staticmethod
     def from_obj(obj):
@@ -248,7 +242,9 @@ class TrendModel:
         all_trends = positive_trends
         all_trends.extend(negative_trends)
         TrendLine.populate_from_file(all_trends, tweet_file)
-        return TrendModel(trends=all_trends)
+        model = TrendModel(trends=all_trends)
+        model.normalize()
+        return model
 
 
 class TrendLine:
@@ -484,12 +480,12 @@ class TrendCell:
         need to be determined experimentally, but for now 1.0 placeholders are
         present.
         """
-        count_distance = math.fabs(self.count - other.count)
-        delta_distance = math.fabs(self.delta - other.delta)
-        dd_distance = math.fabs(self.delta_delta - other.delta_delta)
-        return (TrendCell.count_weight * count_distance) + \
-               (TrendCell.delta_weight * delta_distance) + \
-               (TrendCell.delta_delta_weight * dd_distance)
+        return (self.count - other.count) ** 2 + \
+               (self.delta - other.delta) ** 2 + \
+               (self.delta_delta - other.delta_delta) ** 2 + \
+               (self.avg_followers - other.avg_followers) ** 2 + \
+               (self.avg_statuses - other.avg_statuses) ** 2 + \
+               (self.retweets - other.retweets) ** 2
 
     @staticmethod
     def from_obj(obj):
