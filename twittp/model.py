@@ -16,8 +16,8 @@ def dtw_distance(a, b):
     This takes two numpy arrays and computes the DTW distance according to
     http://en.wikipedia.org/wiki/Dynamic_time_warping
     """
-    n = a.size
-    m = b.size  # Each point in time takes three columns
+    n = len(a.data)
+    m = len(b.data)
 
     dtw = np.zeros((n, m), dtype=np.object)
     dtw[0][0] = 0
@@ -26,13 +26,13 @@ def dtw_distance(a, b):
         if i == 0:
             continue
         j = 0
-        dtw[i][j] = a[i].distance(b[j]) + dtw[i - 1][j]
+        dtw[i][j] = a.data[i].distance(b.data[j]) + dtw[i - 1][j]
 
-    for j in range(n):
+    for j in range(m):
         if j == 0:
             continue
         i = 0
-        dtw[i][j] = a[i].distance(b[j]) + dtw[i][j - 1]
+        dtw[i][j] = a.data[i].distance(b.data[j]) + dtw[i][j - 1]
 
     for i in range(n):
         if i == 0:
@@ -41,7 +41,7 @@ def dtw_distance(a, b):
             if j == 0:
                 continue
 
-            dtw[i][j] = a[i].distance(b[j]) + min(dtw[i - 1][j], dtw[i][j - 1], dtw[i - 1][j - 1])
+            dtw[i][j] = a.data[i].distance(b.data[j]) + min(dtw[i - 1][j], dtw[i][j - 1], dtw[i - 1][j - 1])
     return dtw[n - 1][m - 1]
 
 
@@ -114,8 +114,8 @@ class TrendModel:
         false_negatives = 0
 
         self.normalize()
-        mat, y = [trend.data for trend in self.trends], \
-                 [1 if trend.data.trending else 0 for trend in self.trends]
+        mat, y = [trend for trend in self.trends], \
+                 [1 if trend.data[-1].trending else 0 for trend in self.trends]
 
         for i, trend_a in enumerate(mat):
             match = None
@@ -137,6 +137,7 @@ class TrendModel:
             match_trend = y[match]
             if a_trend == 1 and match_trend == 1:
                 true_positives += 1
+                print("True Positive - Index {}".format(i))
             elif a_trend == 1 and match_trend == 0:
                 false_negatives += 1
                 print("False Negative - Index {}".format(i))
@@ -145,6 +146,7 @@ class TrendModel:
                 print("False Positive - Index {}".format(i))
             else:
                 true_negatives += 1
+                print("True Negative - Index {}".format(i))
 
         precision = true_positives / (true_positives + false_positives)
         recall = true_positives / (true_positives + false_negatives)
@@ -231,6 +233,46 @@ class TrendModel:
             preempt_cells.extend(trend.data)
             trend.data = preempt_cells
             trend.start_ts = trend.start_ts - (trend.window_size * TREND_PREEMT)
+
+        # Create negative trends using a bag of words model
+        stopwords = Stopwords.from_csv(stopwords_file)
+        bag_of_words = BagOfWords.from_file(tweet_file, stopwords=stopwords)
+        negative_trends = TrendLine.construct_negative_trends(positive_trends,
+                                                              bag_of_words)
+
+        # Merge the trends and populate them using tweet data
+        all_trends = positive_trends
+        all_trends.extend(negative_trends)
+        TrendLine.populate_from_file(all_trends, tweet_file)
+        model = TrendModel(trends=all_trends)
+        model.normalize()
+        return model
+
+
+    @staticmethod
+    def new_model_from_files(trend_file, tweet_file, stopwords_file):
+        """ Constructs a TrendModel from tweets and trends.
+
+        This high-level method uses a number of other static methods to build
+        the various components that go into the model. It starts by reading
+        the trends from the trends file, creating "positive" trends from that,
+        building a bag-of-words model of the tweets, creating "negative" trends
+        from the positive trends and bag-of-words, then populating all of these
+        trends with data from the tweets.
+        """
+        # Load the positive trends from the file
+        twitter_trends = TwitterTrend.from_file(trend_file)
+
+        positive_trends = [TrendLine.from_twitter_trend(trend) for trend in
+                           twitter_trends]
+
+        # Remove any short trends
+        positive_trends = [trend for trend in positive_trends if
+                           len(trend.data) >= MINIMUM_TREND_SIZE]
+
+        for pt in positive_trends:
+            pt.data = pt.data[:90]  # Take only 3 hours of data
+            pt.start_ts -= 1000 * 60 * 60 * 3  # Subtract 3 hours from the ts
 
         # Create negative trends using a bag of words model
         stopwords = Stopwords.from_csv(stopwords_file)
