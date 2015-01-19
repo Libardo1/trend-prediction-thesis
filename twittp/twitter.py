@@ -1,8 +1,6 @@
-from bisect import bisect
 import calendar
 from collections import Counter
 import datetime as dt
-import random
 import re
 import json
 
@@ -58,7 +56,7 @@ class TwitterTrend:
 
             # Reduce jdt to the nearest 2-minute window, rounded down
             minutes = jdt.minute
-            minutes = minutes - (minutes % 2)  # If odd, reduce to even
+            minutes -= minutes % 2  # If odd, reduce to even
             jdt.replace(minute=minutes, second=0, microsecond=0)
 
             ts = calendar.timegm(jdt.utctimetuple())
@@ -104,7 +102,6 @@ class BagOfWords(Counter):
             weights.append(total)
             words.append(word)
 
-        positive_names = set([trend.name for trend in positive_trends])
         negative_names = set()
 
         for i in range(n):

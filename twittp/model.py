@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
+from joblib import Parallel, delayed
 import math
+import nltk
 import numpy as np
 import random
 import json
@@ -102,6 +104,43 @@ class TrendModel:
         """
         self.trends = [] if trends is None else trends
 
+    def trend_compare(self, i, trend_a, mat, y):
+        """ """
+        true_positives = 0
+        true_negatives = 0
+        false_positives = 0
+        false_negatives = 0
+        match = None
+        min_distance = None
+
+        for j, trend_b in enumerate(mat):
+            if i == j:
+                continue
+            dist = dtw_distance(trend_a, trend_b)
+            if match is None:
+                match = j
+                min_distance = dist
+            else:
+                if dist < min_distance:
+                    match = j
+                    min_distance = dist
+
+        a_trend = y[i]
+        match_trend = y[match]
+        if a_trend == 1 and match_trend == 1:
+            true_positives += 1
+            print("True Positive - Index {}".format(i))
+        elif a_trend == 1 and match_trend == 0:
+            false_negatives += 1
+            print("False Negative - Index {}".format(i))
+        elif a_trend == 0 and match_trend == 1:
+            false_positives += 1
+            print("False Positive - Index {}".format(i))
+        else:
+            true_negatives += 1
+            print("True Negative - Index {}".format(i))
+        return true_negatives, true_positives, false_negatives, false_positives
+
     def leave_one_out(self):
         """ Computes the leave-one-out precision and recall of the model.
 
@@ -117,36 +156,13 @@ class TrendModel:
         mat, y = [trend for trend in self.trends], \
                  [1 if trend.data[-1].trending else 0 for trend in self.trends]
 
-        for i, trend_a in enumerate(mat):
-            match = None
-            min_distance = None
+        parallel_results = Parallel(n_jobs=4, backend="threading")(delayed(self.trend_compare)(i, trend_a, mat, y) for i, trend_a in enumerate(mat))
 
-            for j, trend_b in enumerate(mat):
-                if i == j:
-                    continue
-                dist = dtw_distance(trend_a, trend_b)
-                if match is None:
-                    match = j
-                    min_distance = dist
-                else:
-                    if dist < min_distance:
-                        match = j
-                        min_distance = dist
-
-            a_trend = y[i]
-            match_trend = y[match]
-            if a_trend == 1 and match_trend == 1:
-                true_positives += 1
-                print("True Positive - Index {}".format(i))
-            elif a_trend == 1 and match_trend == 0:
-                false_negatives += 1
-                print("False Negative - Index {}".format(i))
-            elif a_trend == 0 and match_trend == 1:
-                false_positives += 1
-                print("False Positive - Index {}".format(i))
-            else:
-                true_negatives += 1
-                print("True Negative - Index {}".format(i))
+        for p_true_negatives, p_true_positives, p_false_negatives, p_false_positives in p_parallel_results:
+            true_positives += p_true_positives
+            true_negatives += p_true_negatives
+            false_negatives += p_false_negatives
+            false_positives += p_false_positives
 
         precision = true_positives / (true_positives + false_positives)
         recall = true_positives / (true_positives + false_negatives)
@@ -207,6 +223,18 @@ class TrendModel:
         return TrendModel(trends=trends)
 
     @staticmethod
+    def from_file(file):
+        """ Convenience function to read a JSON obj from a file to an object.
+
+        :param file: The file to read from
+        :return: The final Python object
+        """
+        with open(file, encoding="utf-8") as f:
+            model_string = f.read()
+            model_obj = json.loads(model_string)
+            return TrendModel.from_obj(model_obj)
+
+    @staticmethod
     def model_from_files(trend_file, tweet_file, stopwords_file):
         """ Constructs a TrendModel from tweets and trends.
 
@@ -232,7 +260,7 @@ class TrendModel:
             preempt_cells = [TrendCell(False) for _ in range(TREND_PREEMT)]
             preempt_cells.extend(trend.data)
             trend.data = preempt_cells
-            trend.start_ts = trend.start_ts - (trend.window_size * TREND_PREEMT)
+            trend.start_ts -= trend.window_size * TREND_PREEMT
 
         # Create negative trends using a bag of words model
         stopwords = Stopwords.from_csv(stopwords_file)
@@ -247,7 +275,6 @@ class TrendModel:
         model = TrendModel(trends=all_trends)
         model.normalize()
         return model
-
 
     @staticmethod
     def new_model_from_files(trend_file, tweet_file, stopwords_file):
@@ -417,9 +444,13 @@ class TrendLine:
                     if trend.start_ts <= ts < end_ts[trend.name] and \
                             trend.match_text(words):
                         offset = (ts - trend.start_ts) // trend.window_size
+                        words = nltk.tokenize.word_tokenize(tweet['text'])
                         trend.data[offset].count += 1
                         trend.data[offset].avg_followers += tweet['user_followers']
                         trend.data[offset].avg_statuses += tweet['user_statuses']
+                        trend.data[offset].lengths += len(tweet['text'])
+                        trend.data[offset].lexical_density += 0 if len(words) == 0 \
+                            else len(set(words)) / len(words)
                         retweets = trend.data[offset].retweets
                         trend.data[offset].retweets = retweets + 1 if tweet['retweeted'] else retweets
 
@@ -499,7 +530,7 @@ class TrendCell:
     delta_delta_weight = 1.0
 
     def __init__(self, trending, count=0, delta=0, delta_delta=0, avg_followers=0,
-                 avg_statuses=0, retweets=0):
+                 avg_statuses=0, retweets=0, lengths=0.0, lexical_density=0.0):
         """ Constructor for TrendCell
 
         The only information that is required when constructing a topic cell
@@ -513,6 +544,8 @@ class TrendCell:
         self.avg_followers = avg_followers
         self.avg_statuses = avg_statuses
         self.retweets = retweets
+        self.lengths = lengths
+        self.lexical_density = lexical_density
 
     def distance(self, other):
         """ Find the distance between two TrendCells.
@@ -527,7 +560,9 @@ class TrendCell:
                (self.delta_delta - other.delta_delta) ** 2 + \
                (self.avg_followers - other.avg_followers) ** 2 + \
                (self.avg_statuses - other.avg_statuses) ** 2 + \
-               (self.retweets - other.retweets) ** 2
+               (self.retweets - other.retweets) ** 2 + \
+               (self.lengths - other.lengths) ** 2 + \
+               (self.lexical_density - other.lexical_density) ** 2
 
     @staticmethod
     def from_obj(obj):
