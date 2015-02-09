@@ -1,3 +1,4 @@
+import copy
 from datetime import datetime, timedelta, timezone
 from joblib import Parallel, delayed
 import math
@@ -9,7 +10,7 @@ from .twitter import BagOfWords, Stopwords, TwitterTrend
 
 
 TREND_PREEMT = 90  # Number of windows to preempt trends by
-MINIMUM_TREND_SIZE = 15  # Shortest positive trend to allow
+MINIMUM_TREND_SIZE = 90  # Shortest positive trend to allow
 
 
 def dtw_distance(a, b):
@@ -22,19 +23,17 @@ def dtw_distance(a, b):
     m = len(b.data)
 
     dtw = np.zeros((n, m), dtype=np.object)
-    dtw[0][0] = 0
+    dtw[0][0] = a.data[0].distance(b.data[0])
 
     for i in range(n):
         if i == 0:
             continue
-        j = 0
-        dtw[i][j] = a.data[i].distance(b.data[j]) + dtw[i - 1][j]
+        dtw[i][0] = a.data[i].distance(b.data[0]) + dtw[i - 1][0]
 
     for j in range(m):
         if j == 0:
             continue
-        i = 0
-        dtw[i][j] = a.data[i].distance(b.data[j]) + dtw[i][j - 1]
+        dtw[0][j] = a.data[0].distance(b.data[j]) + dtw[0][j - 1]
 
     for i in range(n):
         if i == 0:
@@ -45,6 +44,46 @@ def dtw_distance(a, b):
 
             dtw[i][j] = a.data[i].distance(b.data[j]) + min(dtw[i - 1][j], dtw[i][j - 1], dtw[i - 1][j - 1])
     return dtw[n - 1][m - 1]
+
+
+def trend_compare(i, mat):
+    """ """
+    true_positives = 0
+    true_negatives = 0
+    false_positives = 0
+    false_negatives = 0
+    match = None
+    min_distance = None
+
+    for j, trend_b in enumerate(mat):
+        if i == j:
+            continue
+        dist = dtw_distance(mat[i], trend_b)
+        if match is None:
+            match = j
+            min_distance = dist
+        else:
+            if dist < min_distance:
+                match = j
+                min_distance = dist
+
+    a_trend = mat[i].data[0].trending
+    match_trend = mat[match].data[0].trending
+    print("{}, {}".format(i, match))
+    print(min_distance)
+    if a_trend and match_trend:
+        true_positives += 1
+        print("[{}] True Positive".format(i))
+    elif a_trend and not match_trend:
+        false_negatives += 1
+        print("[{}] False Negative".format(i))
+    elif not a_trend and match_trend:
+        false_positives += 1
+        print("[{}] False Positive".format(i))
+    else:
+        true_negatives += 1
+        print("[{}] True Negative".format(i))
+    return true_negatives, true_positives, false_negatives, false_positives
 
 
 def array_trend_distance(a, b):
@@ -104,43 +143,6 @@ class TrendModel:
         """
         self.trends = [] if trends is None else trends
 
-    def trend_compare(self, i, trend_a, mat, y):
-        """ """
-        true_positives = 0
-        true_negatives = 0
-        false_positives = 0
-        false_negatives = 0
-        match = None
-        min_distance = None
-
-        for j, trend_b in enumerate(mat):
-            if i == j:
-                continue
-            dist = dtw_distance(trend_a, trend_b)
-            if match is None:
-                match = j
-                min_distance = dist
-            else:
-                if dist < min_distance:
-                    match = j
-                    min_distance = dist
-
-        a_trend = y[i]
-        match_trend = y[match]
-        if a_trend == 1 and match_trend == 1:
-            true_positives += 1
-            print("True Positive - Index {}".format(i))
-        elif a_trend == 1 and match_trend == 0:
-            false_negatives += 1
-            print("False Negative - Index {}".format(i))
-        elif a_trend == 0 and match_trend == 1:
-            false_positives += 1
-            print("False Positive - Index {}".format(i))
-        else:
-            true_negatives += 1
-            print("True Negative - Index {}".format(i))
-        return true_negatives, true_positives, false_negatives, false_positives
-
     def leave_one_out(self):
         """ Computes the leave-one-out precision and recall of the model.
 
@@ -152,13 +154,11 @@ class TrendModel:
         false_positives = 0
         false_negatives = 0
 
-        self.normalize()
-        mat, y = [trend for trend in self.trends], \
-                 [1 if trend.data[-1].trending else 0 for trend in self.trends]
+        mat = [trend for trend in self.trends]
 
-        parallel_results = Parallel(n_jobs=4, backend="threading")(delayed(self.trend_compare)(i, trend_a, mat, y) for i, trend_a in enumerate(mat))
+        parallel_results = Parallel(n_jobs=4)(delayed(trend_compare)(i, mat) for i in range(len(mat)))
 
-        for p_true_negatives, p_true_positives, p_false_negatives, p_false_positives in p_parallel_results:
+        for p_true_negatives, p_true_positives, p_false_negatives, p_false_positives in parallel_results:
             true_positives += p_true_positives
             true_negatives += p_true_negatives
             false_negatives += p_false_negatives
@@ -186,7 +186,7 @@ class TrendModel:
             for j, datum in enumerate(trend.data):
                 m[i, j] = (datum.count, datum.delta, datum.delta_delta,
                            datum.avg_followers, datum.avg_statuses,
-                           datum.retweets)
+                           datum.retweets, datum.lengths, datum.lexical_density)
         return m, y
 
     def normalize(self):
@@ -196,16 +196,20 @@ class TrendModel:
         """
         for i, trend in enumerate(self.trends):
             # Get the maxes for normalization
-            max_count = max([datum.count for datum in trend.data])
-            max_delta = max([datum.delta for datum in trend.data])
-            max_delta_delta = max([datum.delta_delta for datum in trend.data])
-            max_followers = max([datum.avg_followers for datum in trend.data])
-            max_statuses = max([datum.avg_statuses for datum in trend.data])
+            max_count = max([math.fabs(datum.count) for datum in trend.data])
+            max_delta = max([math.fabs(datum.delta) for datum in trend.data])
+            max_delta_delta = max([math.fabs(datum.delta_delta) for datum in trend.data])
+            max_followers = max([math.fabs(datum.avg_followers) for datum in trend.data])
+            max_statuses = max([math.fabs(datum.avg_statuses) for datum in trend.data])
+            max_length = max([math.fabs(datum.lengths) for datum in trend.data])
+            max_ld = max([math.fabs(datum.lexical_density) for datum in trend.data])
             max_count = 1 if max_count == 0 else max_count
             max_delta = 1 if max_delta == 0 else max_delta
             max_delta_delta = 1 if max_delta_delta == 0 else max_delta_delta
             max_statuses = 1 if max_statuses == 0 else max_statuses
             max_followers = 1 if max_followers == 0 else max_followers
+            max_length = 1 if max_length == 0 else max_length
+            max_ld = 1 if max_ld == 0 else max_ld
 
             for j, datum in enumerate(trend.data):
                 datum.count = datum.count / max_count
@@ -213,6 +217,8 @@ class TrendModel:
                 datum.delta_delta = datum.delta_delta / max_delta_delta
                 datum.avg_followers = datum.avg_followers / max_followers
                 datum.avg_statuses = datum.avg_statuses / max_statuses
+                datum.lengths = datum.lengths / max_length
+                datum.lexical_density = datum.lexical_density / max_ld
 
     @staticmethod
     def from_obj(obj):
@@ -298,8 +304,17 @@ class TrendModel:
                            len(trend.data) >= MINIMUM_TREND_SIZE]
 
         for pt in positive_trends:
-            pt.data = pt.data[:90]  # Take only 3 hours of data
-            pt.start_ts -= 1000 * 60 * 60 * 3  # Subtract 3 hours from the ts
+            pt.data = pt.data[:TREND_PREEMT]  # Take only 3 hours of data
+            for d in pt.data:
+                d.trending = True
+            pt.start_ts -= 60 * TREND_PREEMT  # Subtract 3 hours from the ts
+
+        # Add in "decoy" trendlines
+        # pnt = copy.deepcopy(positive_trends)
+        # for t in pnt:
+        #     t.start_ts -= 60 * 60 * 3  # Subtract 3 hours from the ts
+        #     for d in t.data:
+        #         d.trending = False
 
         # Create negative trends using a bag of words model
         stopwords = Stopwords.from_csv(stopwords_file)
@@ -309,6 +324,7 @@ class TrendModel:
 
         # Merge the trends and populate them using tweet data
         all_trends = positive_trends
+        # all_trends.extend(pnt)
         all_trends.extend(negative_trends)
         TrendLine.populate_from_file(all_trends, tweet_file)
         model = TrendModel(trends=all_trends)
@@ -430,8 +446,8 @@ class TrendLine:
         with open(tweet_file, encoding='utf-8') as f:
             # Memoize the ending timestamps for our trends to speed things up
             end_ts = {}
-            for trend in trends:
-                end_ts[trend.name] = trend.start_ts + (trend.window_size * len(trend.data))
+            for i, trend in enumerate(trends):
+                end_ts[i] = trend.start_ts + (trend.window_size * len(trend.data))
 
             for line in f:
                 tweet = json.loads(line)
@@ -440,8 +456,8 @@ class TrendLine:
                                        "%a %b %d %H:%M:%S %z %Y")
                 ts = (dt - datetime(1970, 1, 1, tzinfo=timezone(timedelta(0))))\
                     // timedelta(seconds=1)
-                for trend in trends:
-                    if trend.start_ts <= ts < end_ts[trend.name] and \
+                for i, trend in enumerate(trends):
+                    if trend.start_ts <= ts < end_ts[i] and \
                             trend.match_text(words):
                         offset = (ts - trend.start_ts) // trend.window_size
                         words = nltk.tokenize.word_tokenize(tweet['text'])
@@ -453,6 +469,8 @@ class TrendLine:
                             else len(set(words)) / len(words)
                         retweets = trend.data[offset].retweets
                         trend.data[offset].retweets = retweets + 1 if tweet['retweeted'] else retweets
+                        if tweet['retweeted']:
+                            print("Retweet")
 
         # Second pass
         for trend in trends:
@@ -465,6 +483,8 @@ class TrendLine:
                     datum.avg_followers = datum.avg_followers / datum.count
                     datum.avg_statuses = datum.avg_statuses / datum.count
                     datum.retweets = datum.retweets / datum.count
+                    datum.lengths = datum.lengths / datum.count
+                    datum.lexical_density = datum.lexical_density / datum.count
 
                 if first:
                     datum.delta = 0
@@ -528,6 +548,11 @@ class TrendCell:
     count_weight = 1.0
     delta_weight = 1.0
     delta_delta_weight = 1.0
+    followers_weight = 1.0
+    statuses_weight = 1.0
+    retweets_weight = 1.0
+    lengths_weight = 1.0
+    lexical_density_weight = 1.0
 
     def __init__(self, trending, count=0, delta=0, delta_delta=0, avg_followers=0,
                  avg_statuses=0, retweets=0, lengths=0.0, lexical_density=0.0):
@@ -555,14 +580,14 @@ class TrendCell:
         need to be determined experimentally, but for now 1.0 placeholders are
         present.
         """
-        return (self.count - other.count) ** 2 + \
-               (self.delta - other.delta) ** 2 + \
-               (self.delta_delta - other.delta_delta) ** 2 + \
-               (self.avg_followers - other.avg_followers) ** 2 + \
-               (self.avg_statuses - other.avg_statuses) ** 2 + \
-               (self.retweets - other.retweets) ** 2 + \
-               (self.lengths - other.lengths) ** 2 + \
-               (self.lexical_density - other.lexical_density) ** 2
+        return math.sqrt(self.count_weight * ((self.count - other.count) ** 2) +
+               self.delta_weight * ((self.delta - other.delta) ** 2) +
+               self.delta_delta_weight * ((self.delta_delta - other.delta_delta) ** 2) +
+               self.followers_weight * ((self.avg_followers - other.avg_followers) ** 2) +
+               self.statuses_weight * ((self.avg_statuses - other.avg_statuses) ** 2) +
+               self.retweets_weight * ((self.retweets - other.retweets) ** 2) +
+               self.lengths_weight * ((self.lengths - other.lengths) ** 2) +
+               self.lexical_density_weight * ((self.lexical_density - other.lexical_density) ** 2))
 
     @staticmethod
     def from_obj(obj):
