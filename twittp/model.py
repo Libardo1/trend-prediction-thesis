@@ -1,4 +1,3 @@
-import copy
 from datetime import datetime, timedelta, timezone
 from joblib import Parallel, delayed
 import math
@@ -309,14 +308,6 @@ class TrendModel:
                 d.trending = True
             pt.start_ts -= 60 * TREND_PREEMT  # Subtract 3 hours from the ts
 
-        # Add in "decoy" trendlines
-        # pnt = copy.deepcopy(positive_trends)
-        # for t in pnt:
-        #     t.start_ts -= 60 * 60 * 3  # Subtract 3 hours from the ts
-        #     for d in t.data:
-        #         d.trending = False
-
-        # Create negative trends using a bag of words model
         stopwords = Stopwords.from_csv(stopwords_file)
         bag_of_words = BagOfWords.from_file(tweet_file, stopwords=stopwords)
         negative_trends = TrendLine.construct_negative_trends(positive_trends,
@@ -324,12 +315,66 @@ class TrendModel:
 
         # Merge the trends and populate them using tweet data
         all_trends = positive_trends
-        # all_trends.extend(pnt)
         all_trends.extend(negative_trends)
         TrendLine.populate_from_file(all_trends, tweet_file)
         model = TrendModel(trends=all_trends)
         model.normalize()
         return model
+
+    def knockout(self):
+        """ Perform a knockout test on a model's features.
+
+        :return: A map from the features to the P/R of their knockout
+        """
+        results = {}
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.COUNT_WEIGHT = 0.0
+        results['count'] = self.leave_one_out()
+
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.COUNT_WEIGHT = 1.0
+                datum.DELTA_WEIGHT = 0.0
+        results['delta'] = self.leave_one_out()
+
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.DELTA_WEIGHT = 1.0
+                datum.DELTA_DELTA_WEIGHT = 0.0
+        results['delta_delta'] = self.leave_one_out()
+
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.DELTA_DELTA_WEIGHT = 1.0
+                datum.FOLLOWERS_WEIGHT = 0.0
+        results['followers'] = self.leave_one_out()
+
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.FOLLOWERS_WEIGHT = 1.0
+                datum.STATUSES_WEIGHT = 0.0
+        results['statuses'] = self.leave_one_out()
+
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.STATUSES_WEIGHT = 1.0
+                datum.RETWEETS_WEIGHT = 0.0
+        results['retweets'] = self.leave_one_out()
+
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.RETWEETS_WEIGHT = 1.0
+                datum.LENGTHS_WEIGHT = 0.0
+        results['lengths'] = self.leave_one_out()
+
+        for trend in self.trends:
+            for datum in trend.data:
+                datum.LENGTHS_WEIGHT = 1.0
+                datum.LEXICAL_DENSITY_WEIGHT = 0.0
+        results['ld'] = self.leave_one_out()
+
+        return results
 
 
 class TrendLine:
@@ -545,14 +590,14 @@ class TrendCell:
     number of matching Tweets at this time, the change since the last time, and
     the change in the change since the last time.
     """
-    count_weight = 1.0
-    delta_weight = 1.0
-    delta_delta_weight = 1.0
-    followers_weight = 1.0
-    statuses_weight = 1.0
-    retweets_weight = 1.0
-    lengths_weight = 1.0
-    lexical_density_weight = 1.0
+    COUNT_WEIGHT = 1.0
+    DELTA_WEIGHT = 1.0
+    DELTA_DELTA_WEIGHT = 1.0
+    FOLLOWERS_WEIGHT = 1.0
+    STATUSES_WEIGHT = 1.0
+    RETWEETS_WEIGHT = 1.0
+    LENGTHS_WEIGHT = 1.0
+    LEXICAL_DENSITY_WEIGHT = 1.0
 
     def __init__(self, trending, count=0, delta=0, delta_delta=0, avg_followers=0,
                  avg_statuses=0, retweets=0, lengths=0.0, lexical_density=0.0):
@@ -580,14 +625,14 @@ class TrendCell:
         need to be determined experimentally, but for now 1.0 placeholders are
         present.
         """
-        return math.sqrt(self.count_weight * ((self.count - other.count) ** 2) +
-               self.delta_weight * ((self.delta - other.delta) ** 2) +
-               self.delta_delta_weight * ((self.delta_delta - other.delta_delta) ** 2) +
-               self.followers_weight * ((self.avg_followers - other.avg_followers) ** 2) +
-               self.statuses_weight * ((self.avg_statuses - other.avg_statuses) ** 2) +
-               self.retweets_weight * ((self.retweets - other.retweets) ** 2) +
-               self.lengths_weight * ((self.lengths - other.lengths) ** 2) +
-               self.lexical_density_weight * ((self.lexical_density - other.lexical_density) ** 2))
+        return math.sqrt(self.COUNT_WEIGHT * ((self.count - other.count) ** 2) +
+                         self.DELTA_WEIGHT * ((self.delta - other.delta) ** 2) +
+                         self.DELTA_DELTA_WEIGHT * ((self.delta_delta - other.delta_delta) ** 2) +
+                         self.FOLLOWERS_WEIGHT * ((self.avg_followers - other.avg_followers) ** 2) +
+                         self.STATUSES_WEIGHT * ((self.avg_statuses - other.avg_statuses) ** 2) +
+                         self.RETWEETS_WEIGHT * ((self.retweets - other.retweets) ** 2) +
+                         self.LENGTHS_WEIGHT * ((self.lengths - other.lengths) ** 2) +
+                         self.LEXICAL_DENSITY_WEIGHT * ((self.lexical_density - other.lexical_density) ** 2))
 
     @staticmethod
     def from_obj(obj):

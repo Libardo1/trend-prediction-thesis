@@ -1,3 +1,5 @@
+joblib
+nltk
 numpy
 scipy
 scikit-learn
