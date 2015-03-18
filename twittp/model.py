@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from joblib import Parallel, delayed
 import math
@@ -85,6 +86,44 @@ def trend_compare(i, mat):
     return true_negatives, true_positives, false_negatives, false_positives
 
 
+def trend_compare_test(i, mat, test_mat):
+    """ """
+    true_positives = 0
+    true_negatives = 0
+    false_positives = 0
+    false_negatives = 0
+    match = None
+    min_distance = None
+
+    for j, trend_b in enumerate(mat):
+        dist = dtw_distance(test_mat[i], trend_b)
+        if match is None:
+            match = j
+            min_distance = dist
+        else:
+            if dist < min_distance:
+                match = j
+                min_distance = dist
+
+    a_trend = test_mat[i].data[0].trending
+    match_trend = mat[match].data[0].trending
+    print("{}, {}".format(i, match))
+    print(min_distance)
+    if a_trend and match_trend:
+        true_positives += 1
+        print("[{}] True Positive".format(i))
+    elif a_trend and not match_trend:
+        false_negatives += 1
+        print("[{}] False Negative".format(i))
+    elif not a_trend and match_trend:
+        false_positives += 1
+        print("[{}] False Positive".format(i))
+    else:
+        true_negatives += 1
+        print("[{}] True Negative".format(i))
+    return true_negatives, true_positives, false_negatives, false_positives
+
+
 def array_trend_distance(a, b):
     """ Distance metric between two time-series by minimum alignment.
 
@@ -140,7 +179,76 @@ class TrendModel:
         TrendLines, some positive, some negative. The constructor reflects
         this.
         """
-        self.trends = [] if trends is None else trends
+        self.trends = trends
+
+    def leave_one_out_test(self, test):
+        """ Computes the leave-one-out precision and recall of the model.
+
+        In the future, this may tune TopicCell weights until this is optimum.
+        For now, it just computes it.
+        """
+        true_positives = 0
+        true_negatives = 0
+        false_positives = 0
+        false_negatives = 0
+
+        mat = [trend for trend in self.trends]
+        test_mat = [trend for trend in test.trends]
+
+        parallel_results = Parallel(n_jobs=4)(delayed(trend_compare_test)(i, mat, test_mat) for i in range(len(test_mat)))
+
+        for p_true_negatives, p_true_positives, p_false_negatives, p_false_positives in parallel_results:
+            true_positives += p_true_positives
+            true_negatives += p_true_negatives
+            false_negatives += p_false_negatives
+            false_positives += p_false_positives
+
+        precision = true_positives / (true_positives + false_positives)
+        recall = true_positives / (true_positives + false_negatives)
+
+        return precision, recall
+
+    def flawed_test(self):
+        """
+
+        :return:
+        """
+        results = []
+        model_copy = deepcopy(self)
+        for i, trend in enumerate(model_copy.trends):
+            if not trend.data[0].trending:
+                continue
+            original = list(trend.data)
+            for j in range(1, 91):
+                trend.data = original[:j]
+                if self.match(trend, i):
+                    results.append(90 - j * 2)
+                    print(90 - j * 2)
+                    break
+        return results
+
+    def match(self, trend, i):
+        match = None
+        min_distance = None
+
+        for j, trend_b in enumerate(self.trends):
+            if i == j:
+                continue
+            dist = dtw_distance(trend, trend_b)
+            if match is None:
+                match = j
+                min_distance = dist
+            else:
+                if dist < min_distance:
+                    match = j
+                    min_distance = dist
+
+        print(match)
+        print(min_distance)
+        if self.trends[match].data[0].trending:
+            return True
+        else:
+            return False
 
     def leave_one_out(self):
         """ Computes the leave-one-out precision and recall of the model.
@@ -155,7 +263,7 @@ class TrendModel:
 
         mat = [trend for trend in self.trends]
 
-        parallel_results = Parallel(n_jobs=4)(delayed(trend_compare)(i, mat) for i in range(len(mat)))
+        parallel_results = Parallel(n_jobs=3)(delayed(trend_compare)(i, mat) for i in range(len(mat)))
 
         for p_true_negatives, p_true_positives, p_false_negatives, p_false_positives in parallel_results:
             true_positives += p_true_positives
@@ -306,6 +414,44 @@ class TrendModel:
             pt.data = pt.data[:TREND_PREEMT]  # Take only 3 hours of data
             for d in pt.data:
                 d.trending = True
+            pt.start_ts -= 60 * TREND_PREEMT  # Subtract 3 hours from the ts
+
+        stopwords = Stopwords.from_csv(stopwords_file)
+        bag_of_words = BagOfWords.from_file(tweet_file, stopwords=stopwords)
+        negative_trends = TrendLine.construct_negative_trends(positive_trends,
+                                                              bag_of_words)
+
+        # Merge the trends and populate them using tweet data
+        all_trends = positive_trends
+        all_trends.extend(negative_trends)
+        TrendLine.populate_from_file(all_trends, tweet_file)
+        model = TrendModel(trends=all_trends)
+        model.normalize()
+        return model
+
+    @staticmethod
+    def remaining_model_from_files(trend_file, tweet_file, stopwords_file):
+        """ Constructs a TrendModel from tweets and trends.
+
+        This high-level method uses a number of other static methods to build
+        the various components that go into the model. It starts by reading
+        the trends from the trends file, creating "positive" trends from that,
+        building a bag-of-words model of the tweets, creating "negative" trends
+        from the positive trends and bag-of-words, then populating all of these
+        trends with data from the tweets.
+        """
+        # Load the positive trends from the file
+        twitter_trends = TwitterTrend.from_file(trend_file)
+
+        positive_trends = [TrendLine.from_twitter_trend(trend) for trend in
+                           twitter_trends]
+
+        # Remove any short trends
+        positive_trends = [trend for trend in positive_trends if
+                           0 < len(trend.data) < MINIMUM_TREND_SIZE]
+
+        for pt in positive_trends:
+            pt.data = [TrendCell(trending=True) for _ in range(0, TREND_PREEMT)]  # Take only 3 hours of data
             pt.start_ts -= 60 * TREND_PREEMT  # Subtract 3 hours from the ts
 
         stopwords = Stopwords.from_csv(stopwords_file)
@@ -514,8 +660,6 @@ class TrendLine:
                             else len(set(words)) / len(words)
                         retweets = trend.data[offset].retweets
                         trend.data[offset].retweets = retweets + 1 if tweet['retweeted'] else retweets
-                        if tweet['retweeted']:
-                            print("Retweet")
 
         # Second pass
         for trend in trends:
@@ -641,7 +785,8 @@ class TrendCell:
             return None
         return TrendCell(obj['trending'], obj['count'], obj['delta'],
                          obj['delta_delta'], obj['avg_followers'],
-                         obj['avg_statuses'], obj['retweets'])
+                         obj['avg_statuses'], obj['retweets'], obj['lengths'],
+                         obj['lexical_density'])
 
 
 class TwitTPEncoder(json.JSONEncoder):
